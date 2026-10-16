@@ -44,6 +44,7 @@
 /** @typedef {'QB'|'RB'|'WR'|'TE'|'OL'|'DL'|'LB'|'DB'|'K'} Position */
 /** @typedef {'CANNON_ARM'|'ELUSIVE'|'GLUE_HANDS'|'PASS_RUSHER'|'LOCKDOWN'|'CLUTCH'|'LONG_KICK'} Trait */
 /** @typedef {'AFC'|'NFC'} Conference */
+/** @typedef {'East'|'North'|'South'|'West'} Division */
 /** @typedef {'GROUND_AND_POUND'|'WEST_COAST'|'BALANCED'|'AIR_RAID'} OffensiveScheme */
 /** @typedef {'RUN_STUFF'|'COVER_2_ZONE'|'BLITZ_HEAVY'|'BALANCED'} DefensiveScheme */
 /** @typedef {'CONSERVATIVE'|'AGGRESSIVE'} FourthDownPosture */
@@ -84,6 +85,7 @@
  * @property {string} name
  * @property {string} abbr
  * @property {Conference} conference
+ * @property {Division} division
  * @property {{primary:string, secondary:string}} colors
  * @property {TacticConfiguration} tactic
  * @property {number} cash          milhões
@@ -94,7 +96,7 @@
 /**
  * @typedef {Object} Fixture
  * @property {string} id
- * @property {number} week          1..14 temporada regular; 15..17 playoffs
+ * @property {number} week          1..18 temporada regular; 19..22 playoffs
  * @property {string} homeId
  * @property {string} awayId
  * @property {boolean} neutral      Super Bowl = campo neutro
@@ -150,16 +152,17 @@
 
 /** @typedef {{ matches: MatchState[] }} LiveRound */
 
-/** @typedef {{ AFC: string[], NFC: string[] }} PlayoffSeeds */
+/** Seeds 1..7 por conferência: 1–4 campeões de divisão, 5–7 wild cards. @typedef {{ AFC: string[], NFC: string[] }} PlayoffSeeds */
 /** @typedef {{ pick:number, round:number, teamId:string, playerId:string }} DraftPick */
 
 /**
  * Máquina de estados da temporada (discriminated union por `kind`).
- * REGULAR_SEASON(1..14) → PLAYOFFS_DIVISIONAL → PLAYOFFS_CONFERENCE → SUPER_BOWL
+ * REGULAR_SEASON(1..18) → PLAYOFFS_WILDCARD → PLAYOFFS_DIVISIONAL → PLAYOFFS_CONFERENCE → SUPER_BOWL
  *   → SEASON_RECAP → OFFSEASON_DRAFT → REGULAR_SEASON(ano+1)
  * Qualquer fase → GAME_OVER (diretoria demite o técnico).
  * @typedef {(
  *   | { kind:'REGULAR_SEASON', week:number }
+ *   | { kind:'PLAYOFFS_WILDCARD', seeds:PlayoffSeeds, fixtures:Fixture[] }
  *   | { kind:'PLAYOFFS_DIVISIONAL', seeds:PlayoffSeeds, fixtures:Fixture[] }
  *   | { kind:'PLAYOFFS_CONFERENCE', seeds:PlayoffSeeds, fixtures:Fixture[] }
  *   | { kind:'SUPER_BOWL', seeds:PlayoffSeeds, fixtures:Fixture[] }
@@ -191,6 +194,7 @@
  * @property {LedgerEntry[]} ledger
  * @property {SeasonHistory[]} history
  * @property {(Fixture & {round:string})[]} playoffResults
+ * @property {Record<string, number>} lastPlaces   colocação (0..3) na divisão na temporada anterior
  * @property {number} nextId
  */
 
@@ -272,46 +276,143 @@ const TACTICAL_SYNERGY = Object.freeze({
 });
 
 const LEAGUE_RULES = Object.freeze({
-  SALARY_CAP: 150, MAX_ROSTER: 24, MIN_ROSTER: 16, REGULAR_SEASON_WEEKS: 14, PLAYOFF_SEEDS: 4,
+  SALARY_CAP: 150, MAX_ROSTER: 26, MIN_ROSTER: 16, REGULAR_SEASON_WEEKS: 18, GAMES_PER_TEAM: 17, PLAYOFF_SEEDS: 7,
   QUARTER_SECONDS: 900, OT_SECONDS: 600, DRAFT_ROUNDS: 3, TV_REVENUE: 6, SALARY_WEEKS: 17,
-  ENERGY_RECOVERY: 25, STARTING_CASH: 30, STARTING_BOARD: 60, FIRST_SEASON: 2026,
-  SAVE_KEY: 'gridironfoot.save.v1', SAVE_VERSION: 1,
+  ENERGY_RECOVERY: 25, STARTING_CASH: 30, STARTING_BOARD: 60, FIRST_SEASON: 2025, BYE_WEEKS: [5, 14],
+  SAVE_KEY: 'gridironfoot.save.v2', SAVE_VERSION: 2,
 });
 
 const PHASE_LABELS = Object.freeze({
-  REGULAR_SEASON: 'Temporada Regular', PLAYOFFS_DIVISIONAL: 'Semifinais de Conferência', PLAYOFFS_CONFERENCE: 'Finais de Conferência',
+  REGULAR_SEASON: 'Temporada Regular', PLAYOFFS_WILDCARD: 'Wild Card', PLAYOFFS_DIVISIONAL: 'Divisional Round', PLAYOFFS_CONFERENCE: 'Finais de Conferência',
   SUPER_BOWL: 'Super Bowl', SEASON_RECAP: 'Fim de Temporada', OFFSEASON_DRAFT: 'NFL Draft', GAME_OVER: 'Demitido',
 });
 
+const DIVISIONS = /** @type {const} */ (['East', 'North', 'South', 'West']);
+
+/**
+ * As 32 franquias da NFL, nas divisões reais. Dentro de cada divisão a ordem segue a
+ * classificação de 2024 (usada para os jogos por colocação do primeiro calendário).
+ * `stars`: jogadores reais do início da temporada 2025 — "POS|Nome|OVR|Idade|Trait?".
+ * OVR são estimativas do jogo. O restante do elenco é gerado proceduralmente (`base`).
+ */
 const TEAM_SEEDS = Object.freeze([
-  { id: 'KCM', city: 'Kansas City',   name: 'Monarchs',    conference: 'AFC', primary: '#C8102E', secondary: '#FFB81C', base: 78, fans: 0.85 },
-  { id: 'BUF', city: 'Buffalo',       name: 'Bison',       conference: 'AFC', primary: '#00338D', secondary: '#C60C30', base: 77, fans: 0.75 },
-  { id: 'BAL', city: 'Baltimore',     name: 'Crows',       conference: 'AFC', primary: '#241773', secondary: '#9E7C0C', base: 76, fans: 0.7 },
-  { id: 'CIN', city: 'Cincinnati',    name: 'Tigers',      conference: 'AFC', primary: '#FB4F14', secondary: '#111111', base: 74, fans: 0.55 },
-  { id: 'MIA', city: 'Miami',         name: 'Sharks',      conference: 'AFC', primary: '#008E97', secondary: '#FC4C02', base: 73, fans: 0.6 },
-  { id: 'PIT', city: 'Pittsburgh',    name: 'Steelmen',    conference: 'AFC', primary: '#101820', secondary: '#FFB612', base: 72, fans: 0.8 },
-  { id: 'DEN', city: 'Denver',        name: 'Stallions',   conference: 'AFC', primary: '#FB4F14', secondary: '#002244', base: 71, fans: 0.65 },
-  { id: 'LVO', city: 'Las Vegas',     name: 'Outlaws',     conference: 'AFC', primary: '#000000', secondary: '#A5ACAF', base: 70, fans: 0.6 },
-  { id: 'SFM', city: 'San Francisco', name: 'Miners',      conference: 'NFC', primary: '#AA0000', secondary: '#B3995D', base: 78, fans: 0.8 },
-  { id: 'PHI', city: 'Philadelphia',  name: 'Hawks',       conference: 'NFC', primary: '#004C54', secondary: '#A5ACAF', base: 77, fans: 0.85 },
-  { id: 'DAL', city: 'Dallas',        name: 'Wranglers',   conference: 'NFC', primary: '#003594', secondary: '#869397', base: 75, fans: 0.95 },
-  { id: 'GBL', city: 'Green Bay',     name: 'Lumberjacks', conference: 'NFC', primary: '#203731', secondary: '#FFB612', base: 74, fans: 0.9 },
-  { id: 'DET', city: 'Detroit',       name: 'Pumas',       conference: 'NFC', primary: '#0076B6', secondary: '#B0B7BC', base: 76, fans: 0.65 },
-  { id: 'SEA', city: 'Seattle',       name: 'Orcas',       conference: 'NFC', primary: '#002244', secondary: '#69BE28', base: 72, fans: 0.7 },
-  { id: 'CHI', city: 'Chicago',       name: 'Grizzlies',   conference: 'NFC', primary: '#0B162A', secondary: '#C83803', base: 70, fans: 0.75 },
-  { id: 'NYT', city: 'New York',      name: 'Titans',      conference: 'NFC', primary: '#0B2265', secondary: '#A71930', base: 71, fans: 0.8 },
+  // ---------------- AFC EAST ----------------
+  { id: 'BUF', city: 'Buffalo', name: 'Bills', conference: 'AFC', division: 'East', primary: '#00338D', secondary: '#C60C30', base: 74, fans: 0.85, stars: [
+    'QB|Josh Allen|95|29|CANNON_ARM', 'RB|James Cook|83|26', 'WR|Khalil Shakir|78|25', 'WR|Keon Coleman|73|22', 'TE|Dalton Kincaid|77|25', 'OL|Dion Dawkins|83|31',
+    'DL|Ed Oliver|82|27', 'DL|Joey Bosa|81|30|PASS_RUSHER', 'LB|Terrel Bernard|80|26', 'DB|Christian Benford|81|24', 'DB|Taron Johnson|79|28', 'K|Tyler Bass|80|28'] },
+  { id: 'MIA', city: 'Miami', name: 'Dolphins', conference: 'AFC', division: 'East', primary: '#008E97', secondary: '#FC4C02', base: 71, fans: 0.7, stars: [
+    'QB|Tua Tagovailoa|81|27', "RB|De'Von Achane|85|24|ELUSIVE", 'WR|Tyreek Hill|89|31|ELUSIVE', 'WR|Jaylen Waddle|84|27', 'TE|Darren Waller|74|33',
+    'DL|Zach Sieler|82|29', 'DL|Chop Robinson|76|22|PASS_RUSHER', 'LB|Jordyn Brooks|82|28', 'DB|Minkah Fitzpatrick|83|29', 'K|Jason Sanders|82|30'] },
+  { id: 'NYJ', city: 'New York', name: 'Jets', conference: 'AFC', division: 'East', primary: '#125740', secondary: '#FFFFFF', base: 70, fans: 0.75, stars: [
+    'QB|Justin Fields|74|26|ELUSIVE', 'RB|Breece Hall|81|24', 'WR|Garrett Wilson|86|25|GLUE_HANDS', 'TE|Mason Taylor|70|21', 'OL|Olu Fashanu|76|22',
+    'DL|Quinnen Williams|89|27', 'DL|Will McDonald IV|78|26|PASS_RUSHER', 'LB|Quincy Williams|82|29', 'LB|Jamien Sherwood|79|25', 'DB|Sauce Gardner|88|25|LOCKDOWN'] },
+  { id: 'NE', city: 'New England', name: 'Patriots', conference: 'AFC', division: 'East', primary: '#002244', secondary: '#C60C30', base: 70, fans: 0.8, stars: [
+    'QB|Drake Maye|83|23', 'RB|TreVeyon Henderson|77|23|ELUSIVE', 'RB|Rhamondre Stevenson|75|27', 'WR|Stefon Diggs|80|31|GLUE_HANDS', 'TE|Hunter Henry|78|30',
+    'OL|Will Campbell|75|21', 'DL|Christian Barmore|80|26', 'DL|Milton Williams|80|26', 'LB|Robert Spillane|78|29', 'DB|Christian Gonzalez|87|23|LOCKDOWN', 'DB|Carlton Davis III|78|28'] },
+  // ---------------- AFC NORTH ----------------
+  { id: 'BAL', city: 'Baltimore', name: 'Ravens', conference: 'AFC', division: 'North', primary: '#241773', secondary: '#9E7C0C', base: 75, fans: 0.8, stars: [
+    'QB|Lamar Jackson|95|28|ELUSIVE', 'RB|Derrick Henry|91|31', 'WR|Zay Flowers|84|25|ELUSIVE', 'WR|DeAndre Hopkins|76|33|GLUE_HANDS', 'TE|Mark Andrews|82|30',
+    'OL|Tyler Linderbaum|85|25', 'OL|Ronnie Stanley|82|31', 'DL|Nnamdi Madubuike|86|27', 'LB|Roquan Smith|90|28', 'DB|Kyle Hamilton|93|24', 'DB|Marlon Humphrey|85|29|LOCKDOWN', 'K|Tyler Loop|76|24'] },
+  { id: 'PIT', city: 'Pittsburgh', name: 'Steelers', conference: 'AFC', division: 'North', primary: '#101820', secondary: '#FFB612', base: 72, fans: 0.85, stars: [
+    'QB|Aaron Rodgers|80|41', 'RB|Jaylen Warren|78|26', 'WR|DK Metcalf|86|27', 'TE|Pat Freiermuth|78|26', 'TE|Jonnu Smith|76|30',
+    'DL|T.J. Watt|94|30|PASS_RUSHER', 'DL|Cameron Heyward|87|36', 'LB|Patrick Queen|80|26', 'DB|Jalen Ramsey|85|30|LOCKDOWN', 'DB|Joey Porter Jr.|80|24', 'K|Chris Boswell|88|34|LONG_KICK'] },
+  { id: 'CIN', city: 'Cincinnati', name: 'Bengals', conference: 'AFC', division: 'North', primary: '#FB4F14', secondary: '#000000', base: 71, fans: 0.65, stars: [
+    'QB|Joe Burrow|93|28|CLUTCH', 'RB|Chase Brown|80|25', "WR|Ja'Marr Chase|97|25|ELUSIVE", 'WR|Tee Higgins|86|26', 'TE|Mike Gesicki|74|29',
+    'OL|Orlando Brown Jr.|80|29', 'DL|Trey Hendrickson|89|30|PASS_RUSHER', 'LB|Logan Wilson|78|29', 'K|Evan McPherson|80|26|LONG_KICK'] },
+  { id: 'CLE', city: 'Cleveland', name: 'Browns', conference: 'AFC', division: 'North', primary: '#311D00', secondary: '#FF3C00', base: 68, fans: 0.8, stars: [
+    'QB|Joe Flacco|72|40', 'QB|Shedeur Sanders|68|23', 'RB|Quinshon Judkins|76|21', 'WR|Jerry Jeudy|80|26', 'TE|David Njoku|80|29', 'OL|Joel Bitonio|84|33',
+    'DL|Myles Garrett|97|29|PASS_RUSHER', 'DL|Mason Graham|76|21', 'LB|Carson Schwesinger|74|22', 'DB|Denzel Ward|86|28|LOCKDOWN', 'DB|Grant Delpit|78|26'] },
+  // ---------------- AFC SOUTH ----------------
+  { id: 'HOU', city: 'Houston', name: 'Texans', conference: 'AFC', division: 'South', primary: '#03202F', secondary: '#A71930', base: 72, fans: 0.7, stars: [
+    'QB|C.J. Stroud|84|23', 'RB|Joe Mixon|82|29', 'WR|Nico Collins|90|26', 'WR|Christian Kirk|76|28', 'TE|Dalton Schultz|76|29',
+    'DL|Will Anderson Jr.|90|24|PASS_RUSHER', 'DL|Danielle Hunter|89|30|PASS_RUSHER', 'LB|Azeez Al-Shaair|80|28', 'DB|Derek Stingley Jr.|90|24|LOCKDOWN', 'DB|Kamari Lassiter|78|22', "K|Ka'imi Fairbairn|85|31|LONG_KICK"] },
+  { id: 'IND', city: 'Indianapolis', name: 'Colts', conference: 'AFC', division: 'South', primary: '#002C5F', secondary: '#A2AAAD', base: 70, fans: 0.7, stars: [
+    'QB|Daniel Jones|78|28', 'RB|Jonathan Taylor|90|26|ELUSIVE', 'WR|Michael Pittman Jr.|80|27', 'WR|Josh Downs|78|24', 'TE|Tyler Warren|76|23',
+    'OL|Quenton Nelson|90|29', 'DL|DeForest Buckner|86|31', 'LB|Zaire Franklin|82|29', 'DB|Kenny Moore II|80|30', 'DB|Camryn Bynum|78|27'] },
+  { id: 'JAX', city: 'Jacksonville', name: 'Jaguars', conference: 'AFC', division: 'South', primary: '#006778', secondary: '#D7A22A', base: 69, fans: 0.6, stars: [
+    'QB|Trevor Lawrence|82|25', 'RB|Travis Etienne Jr.|78|26', 'WR|Brian Thomas Jr.|86|22|ELUSIVE', 'WR|Travis Hunter|78|22', 'TE|Brenton Strange|72|24',
+    'DL|Josh Hines-Allen|86|27|PASS_RUSHER', 'DL|Travon Walker|82|25', 'LB|Foyesade Oluokun|78|30', 'DB|Tyson Campbell|80|25', 'K|Cam Little|82|22|LONG_KICK'] },
+  { id: 'TEN', city: 'Tennessee', name: 'Titans', conference: 'AFC', division: 'South', primary: '#0C2340', secondary: '#4B92DB', base: 67, fans: 0.6, stars: [
+    'QB|Cam Ward|72|23|CANNON_ARM', 'RB|Tony Pollard|78|28', 'WR|Calvin Ridley|80|30', 'TE|Chig Okonkwo|72|26',
+    'DL|Jeffery Simmons|90|28', "DB|L'Jarius Sneed|78|28", 'K|Joey Slye|78|29|LONG_KICK'] },
+  // ---------------- AFC WEST ----------------
+  { id: 'KC', city: 'Kansas City', name: 'Chiefs', conference: 'AFC', division: 'West', primary: '#E31837', secondary: '#FFB81C', base: 74, fans: 0.9, stars: [
+    'QB|Patrick Mahomes|96|29|CLUTCH', 'RB|Isiah Pacheco|78|26', 'WR|Rashee Rice|84|25', 'WR|Xavier Worthy|80|22|ELUSIVE', 'TE|Travis Kelce|86|35|GLUE_HANDS',
+    'OL|Creed Humphrey|90|26', 'OL|Trey Smith|85|26', 'DL|Chris Jones|94|31', 'DL|George Karlaftis|82|24', 'LB|Nick Bolton|80|25', 'DB|Trent McDuffie|88|25|LOCKDOWN', 'K|Harrison Butker|88|30|CLUTCH'] },
+  { id: 'LAC', city: 'Los Angeles', name: 'Chargers', conference: 'AFC', division: 'West', primary: '#0080C6', secondary: '#FFC20E', base: 73, fans: 0.55, stars: [
+    'QB|Justin Herbert|90|27|CANNON_ARM', 'RB|Omarion Hampton|76|22', 'RB|Najee Harris|76|27', 'WR|Ladd McConkey|86|23|ELUSIVE', 'WR|Keenan Allen|78|33|GLUE_HANDS',
+    'OL|Joe Alt|84|22', 'DL|Khalil Mack|86|34|PASS_RUSHER', 'LB|Daiyan Henley|78|26', 'DB|Derwin James Jr.|90|29', 'K|Cameron Dicker|90|25|LONG_KICK'] },
+  { id: 'DEN', city: 'Denver', name: 'Broncos', conference: 'AFC', division: 'West', primary: '#FB4F14', secondary: '#002244', base: 73, fans: 0.75, stars: [
+    'QB|Bo Nix|84|25', 'RB|J.K. Dobbins|78|26', 'WR|Courtland Sutton|84|29', 'TE|Evan Engram|78|31', 'OL|Quinn Meinerz|86|27',
+    'DL|Zach Allen|86|28', 'DL|Nik Bonitto|86|25|PASS_RUSHER', 'DB|Pat Surtain II|95|25|LOCKDOWN', 'DB|Talanoa Hufanga|78|25', 'K|Wil Lutz|80|31'] },
+  { id: 'LV', city: 'Las Vegas', name: 'Raiders', conference: 'AFC', division: 'West', primary: '#000000', secondary: '#A5ACAF', base: 68, fans: 0.65, stars: [
+    'QB|Geno Smith|80|34', 'RB|Ashton Jeanty|82|21|ELUSIVE', 'WR|Jakobi Meyers|80|28', 'TE|Brock Bowers|90|22|GLUE_HANDS',
+    'DL|Maxx Crosby|94|28|PASS_RUSHER', 'K|Daniel Carlson|84|30|LONG_KICK'] },
+  // ---------------- NFC EAST ----------------
+  { id: 'PHI', city: 'Philadelphia', name: 'Eagles', conference: 'NFC', division: 'East', primary: '#004C54', secondary: '#A5ACAF', base: 76, fans: 0.9, stars: [
+    'QB|Jalen Hurts|88|27|CLUTCH', 'RB|Saquon Barkley|96|28|ELUSIVE', 'WR|A.J. Brown|92|28', 'WR|DeVonta Smith|86|26|GLUE_HANDS', 'TE|Dallas Goedert|80|30',
+    'OL|Lane Johnson|92|35', 'OL|Jordan Mailata|90|28', 'DL|Jalen Carter|90|24', 'LB|Zack Baun|86|28', 'DB|Quinyon Mitchell|86|24|LOCKDOWN', 'DB|Cooper DeJean|84|22', 'K|Jake Elliott|84|30'] },
+  { id: 'WAS', city: 'Washington', name: 'Commanders', conference: 'NFC', division: 'East', primary: '#5A1414', secondary: '#FFB612', base: 73, fans: 0.75, stars: [
+    'QB|Jayden Daniels|90|24|ELUSIVE', 'RB|Austin Ekeler|74|30', 'WR|Terry McLaurin|86|30', 'WR|Deebo Samuel|80|29', 'TE|Zach Ertz|76|34', 'OL|Laremy Tunsil|88|31',
+    'DL|Daron Payne|82|28', 'LB|Bobby Wagner|84|35', 'LB|Frankie Luvu|84|29|PASS_RUSHER', 'DB|Marshon Lattimore|80|29', 'K|Matt Gay|80|31'] },
+  { id: 'DAL', city: 'Dallas', name: 'Cowboys', conference: 'NFC', division: 'East', primary: '#003594', secondary: '#869397', base: 71, fans: 0.95, stars: [
+    'QB|Dak Prescott|86|32', 'RB|Javonte Williams|76|25', 'WR|CeeDee Lamb|94|26', 'WR|George Pickens|86|24', 'TE|Jake Ferguson|78|26', 'OL|Tyler Smith|88|24',
+    'DL|Osa Odighizuwa|80|27', 'DB|Trevon Diggs|82|27', 'DB|DaRon Bland|82|26', 'K|Brandon Aubrey|92|30|LONG_KICK'] },
+  { id: 'NYG', city: 'New York', name: 'Giants', conference: 'NFC', division: 'East', primary: '#0B2265', secondary: '#A71930', base: 68, fans: 0.8, stars: [
+    'QB|Russell Wilson|74|36', 'QB|Jaxson Dart|70|22', 'RB|Tyrone Tracy Jr.|74|25', 'RB|Cam Skattebo|74|23', 'WR|Malik Nabers|88|22', "WR|Wan'Dale Robinson|76|24",
+    'OL|Andrew Thomas|86|26', 'DL|Dexter Lawrence II|92|27', 'DL|Brian Burns|86|27|PASS_RUSHER', 'DL|Abdul Carter|80|22|PASS_RUSHER', 'LB|Bobby Okereke|78|29', 'DB|Jevon Holland|80|25', 'K|Graham Gano|76|38'] },
+  // ---------------- NFC NORTH ----------------
+  { id: 'DET', city: 'Detroit', name: 'Lions', conference: 'NFC', division: 'North', primary: '#0076B6', secondary: '#B0B7BC', base: 76, fans: 0.8, stars: [
+    'QB|Jared Goff|88|31', 'RB|Jahmyr Gibbs|94|23|ELUSIVE', 'RB|David Montgomery|82|28', 'WR|Amon-Ra St. Brown|94|25|GLUE_HANDS', 'WR|Jameson Williams|84|24', 'TE|Sam LaPorta|84|24',
+    'OL|Penei Sewell|95|25', 'DL|Aidan Hutchinson|92|25|PASS_RUSHER', 'LB|Jack Campbell|84|25', 'DB|Kerby Joseph|86|25', 'DB|Brian Branch|86|24', 'K|Jake Bates|84|26|LONG_KICK'] },
+  { id: 'MIN', city: 'Minnesota', name: 'Vikings', conference: 'NFC', division: 'North', primary: '#4F2683', secondary: '#FFC62F', base: 74, fans: 0.8, stars: [
+    'QB|J.J. McCarthy|74|22', 'RB|Aaron Jones|80|30', 'WR|Justin Jefferson|97|26|GLUE_HANDS', 'WR|Jordan Addison|82|23', 'TE|T.J. Hockenson|84|28', 'OL|Christian Darrisaw|86|26',
+    'DL|Jonathan Greenard|86|28|PASS_RUSHER', 'DL|Jonathan Allen|80|30', 'LB|Andrew Van Ginkel|84|30', 'LB|Blake Cashman|80|29', 'DB|Harrison Smith|84|36', 'DB|Byron Murphy Jr.|82|27', 'K|Will Reichard|82|24'] },
+  { id: 'GB', city: 'Green Bay', name: 'Packers', conference: 'NFC', division: 'North', primary: '#203731', secondary: '#FFB612', base: 74, fans: 0.95, stars: [
+    'QB|Jordan Love|84|26|CANNON_ARM', 'RB|Josh Jacobs|88|27', 'WR|Jayden Reed|80|25', 'WR|Romeo Doubs|76|25', 'TE|Tucker Kraft|82|24',
+    'DL|Micah Parsons|95|26|PASS_RUSHER', 'DL|Rashan Gary|84|27', 'LB|Edgerrin Cooper|82|24', 'LB|Quay Walker|80|25', 'DB|Xavier McKinney|88|26', 'K|Brandon McManus|82|34'] },
+  { id: 'CHI', city: 'Chicago', name: 'Bears', conference: 'NFC', division: 'North', primary: '#0B162A', secondary: '#C83803', base: 71, fans: 0.8, stars: [
+    'QB|Caleb Williams|82|23', "RB|D'Andre Swift|78|26", 'WR|DJ Moore|84|28', 'WR|Rome Odunze|80|23', 'TE|Colston Loveland|74|21', 'TE|Cole Kmet|74|26', 'OL|Joe Thuney|88|32',
+    'DL|Montez Sweat|84|29|PASS_RUSHER', 'DL|Grady Jarrett|80|32', 'LB|T.J. Edwards|82|29', 'DB|Jaylon Johnson|86|26|LOCKDOWN', 'DB|Kevin Byard III|80|32', 'K|Cairo Santos|82|33'] },
+  // ---------------- NFC SOUTH ----------------
+  { id: 'TB', city: 'Tampa Bay', name: 'Buccaneers', conference: 'NFC', division: 'South', primary: '#D50A0A', secondary: '#34302B', base: 73, fans: 0.7, stars: [
+    'QB|Baker Mayfield|86|30', 'RB|Bucky Irving|84|23|ELUSIVE', 'WR|Mike Evans|88|32', 'WR|Chris Godwin|84|29', 'WR|Emeka Egbuka|78|23', 'TE|Cade Otton|74|26',
+    'OL|Tristan Wirfs|92|26', 'DL|Vita Vea|86|30', 'LB|Lavonte David|82|35', 'DB|Antoine Winfield Jr.|86|27', 'K|Chase McLaughlin|86|29|LONG_KICK'] },
+  { id: 'ATL', city: 'Atlanta', name: 'Falcons', conference: 'NFC', division: 'South', primary: '#A71930', secondary: '#000000', base: 70, fans: 0.65, stars: [
+    'QB|Michael Penix Jr.|78|25|CANNON_ARM', 'RB|Bijan Robinson|94|23|ELUSIVE', 'WR|Drake London|88|24', 'WR|Darnell Mooney|78|27', 'TE|Kyle Pitts|78|25',
+    'OL|Chris Lindstrom|88|28', 'LB|Kaden Elliss|80|30', 'DB|Jessie Bates III|88|28', 'DB|A.J. Terrell|82|26', 'K|Younghoe Koo|78|31'] },
+  { id: 'CAR', city: 'Carolina', name: 'Panthers', conference: 'NFC', division: 'South', primary: '#0085CA', secondary: '#101820', base: 67, fans: 0.55, stars: [
+    'QB|Bryce Young|76|24', 'RB|Chuba Hubbard|80|26', 'WR|Tetairoa McMillan|80|22', 'WR|Xavier Legette|72|24', 'OL|Ikem Ekwonu|80|25',
+    'DL|Derrick Brown|88|27', 'DB|Jaycee Horn|86|25|LOCKDOWN'] },
+  { id: 'NO', city: 'New Orleans', name: 'Saints', conference: 'NFC', division: 'South', primary: '#D3BC8D', secondary: '#101820', base: 67, fans: 0.75, stars: [
+    'QB|Spencer Rattler|70|24', 'QB|Tyler Shough|68|25', 'RB|Alvin Kamara|82|30', 'WR|Chris Olave|84|25', 'WR|Rashid Shaheed|80|27|ELUSIVE', 'TE|Juwan Johnson|74|28',
+    'OL|Erik McCoy|82|28', 'DL|Cameron Jordan|80|36', 'LB|Demario Davis|84|36', 'DB|Alontae Taylor|76|27', 'K|Blake Grupe|76|26'] },
+  // ---------------- NFC WEST ----------------
+  { id: 'LAR', city: 'Los Angeles', name: 'Rams', conference: 'NFC', division: 'West', primary: '#003594', secondary: '#FFA300', base: 74, fans: 0.6, stars: [
+    'QB|Matthew Stafford|86|37|CANNON_ARM', 'RB|Kyren Williams|86|25', 'WR|Puka Nacua|92|24|GLUE_HANDS', 'WR|Davante Adams|86|32', 'TE|Tyler Higbee|72|32',
+    'DL|Kobie Turner|84|26', 'DL|Jared Verse|86|24|PASS_RUSHER', 'DL|Byron Young|82|27|PASS_RUSHER', 'K|Joshua Karty|78|24'] },
+  { id: 'SEA', city: 'Seattle', name: 'Seahawks', conference: 'NFC', division: 'West', primary: '#002244', secondary: '#69BE28', base: 72, fans: 0.8, stars: [
+    'QB|Sam Darnold|82|28', 'RB|Kenneth Walker III|82|24|ELUSIVE', 'WR|Jaxon Smith-Njigba|90|23|GLUE_HANDS', 'WR|Cooper Kupp|80|32', 'TE|AJ Barner|72|23',
+    'DL|Leonard Williams|86|31', 'DL|DeMarcus Lawrence|82|33|PASS_RUSHER', 'LB|Ernest Jones IV|82|26', 'DB|Devon Witherspoon|88|25', 'DB|Julian Love|80|27', 'K|Jason Myers|82|34'] },
+  { id: 'ARI', city: 'Arizona', name: 'Cardinals', conference: 'NFC', division: 'West', primary: '#97233F', secondary: '#000000', base: 70, fans: 0.55, stars: [
+    'QB|Kyler Murray|84|28|ELUSIVE', 'RB|James Conner|82|30', 'WR|Marvin Harrison Jr.|84|23', 'TE|Trey McBride|90|25|GLUE_HANDS', 'OL|Paris Johnson Jr.|80|23',
+    'DL|Josh Sweat|80|28|PASS_RUSHER', 'DB|Budda Baker|86|29', 'K|Chad Ryland|76|26'] },
+  { id: 'SF', city: 'San Francisco', name: '49ers', conference: 'NFC', division: 'West', primary: '#AA0000', secondary: '#B3995D', base: 74, fans: 0.85, stars: [
+    'QB|Brock Purdy|86|25', 'RB|Christian McCaffrey|92|29|ELUSIVE', 'WR|Jauan Jennings|78|28', 'WR|Ricky Pearsall|76|24', 'TE|George Kittle|92|31', 'OL|Trent Williams|94|37',
+    'DL|Nick Bosa|93|27|PASS_RUSHER', 'LB|Fred Warner|94|28', 'DB|Deommodore Lenoir|80|26', 'K|Jake Moody|74|25'] },
 ]);
 
-const FIRST_NAMES = ['James', 'Marcus', 'Tyrell', 'Jalen', 'Patrick', 'Derrick', 'Cody', 'Austin', 'Brandon', 'Caleb', 'DeShawn', 'Trevor',
+// Nomes para os jogadores gerados (sobrenomes de estrelas reais removidos para evitar homônimos).
+const FIRST_NAMES = ['James', 'Marcus', 'Tyrell', 'Jalen', 'Derrick', 'Cody', 'Austin', 'Brandon', 'Caleb', 'DeShawn', 'Trevor',
   'Justin', 'Aaron', 'Darius', 'Jamal', 'Kyle', 'Malik', 'Nate', 'Omar', 'Quentin', 'Rashad', 'Sam', 'Travis', 'Victor', 'Wyatt', 'Zach',
-  'Andre', 'Bryce', 'Colt', 'Dante', 'Eli', 'Frank', 'Garrett', 'Hunter', 'Isaiah', 'Jordan', 'Keenan', 'Lamar', 'Micah', 'Noah', 'Tua', 'Joe',
-  'Josh', 'Russell', 'Kenny', 'Cooper', 'Tyreek', 'Davante', 'Myles', 'Jaire', 'Xavier', 'Luis', 'Bruno', 'Diego'];
+  'Andre', 'Bryce', 'Colt', 'Dante', 'Eli', 'Frank', 'Garrett', 'Hunter', 'Isaiah', 'Jordan', 'Keenan', 'Micah', 'Noah', 'Joe',
+  'Russell', 'Kenny', 'Cooper', 'Xavier', 'Luis', 'Bruno', 'Diego', 'Trent', 'Mason', 'Logan', 'Carter', 'Dylan', 'Elijah', 'Grant'];
 const LAST_NAMES = ['Johnson', 'Williams', 'Brown', 'Jackson', 'Davis', 'Miller', 'Wilson', 'Moore', 'Taylor', 'Thomas', 'Harris', 'Martin',
-  'Thompson', 'White', 'Robinson', 'Walker', 'Allen', 'Young', 'King', 'Wright', 'Hill', 'Green', 'Adams', 'Baker', 'Nelson', 'Carter',
+  'Thompson', 'White', 'Robinson', 'Walker', 'Young', 'King', 'Wright', 'Hill', 'Green', 'Adams', 'Baker', 'Nelson', 'Carter',
   'Mitchell', 'Roberts', 'Turner', 'Phillips', 'Campbell', 'Parker', 'Evans', 'Edwards', 'Collins', 'Stewart', 'Morris', 'Rogers', 'Reed',
-  'Cook', 'Bell', 'Murphy', 'Bailey', 'Cooper', 'Howard', 'Ward', 'Peterson', 'Gray', 'James', 'Watson', 'Brooks', 'Sanders', 'Price',
+  'Cook', 'Bell', 'Murphy', 'Bailey', 'Howard', 'Ward', 'Peterson', 'Gray', 'Watson', 'Brooks', 'Sanders', 'Price',
   'Bennett', 'Wood', 'Barnes', 'Henderson', 'Coleman', 'Jenkins', 'Perry', 'Powell', 'Long', 'Hughes', 'Washington', 'Butler', 'Simmons',
-  'Foster', 'Bryant', 'Alexander', 'Griffin', 'Diggs', 'Kelce', 'Mahomes', 'Burrow', 'Garrett', 'Ramsey', 'Silva', 'Santos', 'Oliveira'];
+  'Foster', 'Bryant', 'Alexander', 'Griffin', 'Silva', 'Santos', 'Oliveira', 'Hayes', 'Myers', 'Ford', 'Graham', 'Sullivan', 'Wallace'];
 
 // =====================================================================================
 // === 2. PURE ENGINE ==================================================================
@@ -391,21 +492,40 @@ function processSalaryCap(team, roster) {
 function generatePlayer(rng, nextId, position, target, teamId, ageRange = [22, 34]) {
   const ovr = clamp(Math.round(gauss(rng, target, 3.5)), 48, 97);
   const trait = rng() < 0.24 ? pickOne(rng, TRAITS_BY_POSITION[position]) : null;
+  let name = '';
+  do { name = `${pickOne(rng, FIRST_NAMES)} ${pickOne(rng, LAST_NAMES)}`; } while (REAL_PLAYER_NAMES.has(name));
   return {
-    id: nextId(), name: `${pickOne(rng, FIRST_NAMES)} ${pickOne(rng, LAST_NAMES)}`, age: randInt(rng, ageRange[0], ageRange[1]),
+    id: nextId(), name, age: randInt(rng, ageRange[0], ageRange[1]),
     position, ovr, energy: 100, morale: randInt(rng, 55, 75), salary: salaryFor(ovr, position), trait, teamId,
     starter: false, injuryWeeks: 0, stats: emptyStats(),
   };
 }
 
-/** Elenco de 20 jogadores: titulares ~base+2, reservas ~base-7. */
-function generateTeamRoster(rng, nextId, teamId, base) {
+/** @typedef {{ position:Position, name:string, ovr:number, age:number, trait:Trait|null }} RealPlayerSeed */
+/** "POS|Nome|OVR|Idade|Trait?" → RealPlayerSeed @returns {RealPlayerSeed} */
+function parseStar(line) {
+  const [position, name, ovr, age, trait] = line.split('|');
+  return { position: /** @type {Position} */ (position), name, ovr: Number(ovr), age: Number(age), trait: /** @type {Trait} */ (trait) || null };
+}
+const REAL_PLAYER_NAMES = new Set(TEAM_SEEDS.flatMap((t) => t.stars.map((l) => parseStar(l).name)));
+
+/**
+ * Elenco: jogadores reais da franquia + reservas e titulares gerados até a profundidade-alvo.
+ * Titulares gerados ~base, reservas ~base-8.
+ */
+function generateTeamRoster(rng, nextId, teamId, base, stars = []) {
   /** @type {Player[]} */
   const roster = [];
+  const real = stars.map(parseStar);
   for (const pos of POSITIONS) {
-    for (let i = 0; i < ROSTER_TEMPLATE[pos]; i++) {
+    const mine = real.filter((r) => r.position === pos).sort((a, b) => b.ovr - a.ovr);
+    mine.forEach((r) => roster.push({
+      id: nextId(), name: r.name, age: r.age, position: pos, ovr: r.ovr, energy: 100, morale: randInt(rng, 60, 78),
+      salary: salaryFor(r.ovr, pos), trait: r.trait, teamId, starter: false, injuryWeeks: 0, stats: emptyStats(),
+    }));
+    for (let i = mine.length; i < ROSTER_TEMPLATE[pos]; i++) {
       const isStarter = i < STARTER_SLOTS[pos];
-      roster.push(generatePlayer(rng, nextId, pos, isStarter ? base + 2 : base - 7, teamId, isStarter ? [23, 34] : [21, 30]));
+      roster.push(generatePlayer(rng, nextId, pos, isStarter ? base : base - 8, teamId, isStarter ? [24, 33] : [21, 30]));
     }
   }
   // Garante payroll abaixo do teto com folga (contratos "cap-friendly" na criação da liga).
@@ -426,11 +546,11 @@ function generateFreeAgents(rng, nextId, count) {
 }
 
 /**
- * Classe universitária: 56 prospectos (21–23 anos).
+ * Classe universitária: 112 prospectos (21–23 anos) para 3 rodadas × 32 escolhas.
  * @param {number} seasonYear @param {() => number} rng @param {() => string} nextId
  */
 function generateDraftClass(seasonYear, rng, nextId) {
-  const distribution = { QB: 5, RB: 6, WR: 9, TE: 4, OL: 8, DL: 8, LB: 6, DB: 8, K: 2 };
+  const distribution = { QB: 10, RB: 12, WR: 18, TE: 8, OL: 16, DL: 16, LB: 12, DB: 16, K: 4 };
   /** @type {Player[]} */
   const prospects = [];
   for (const pos of POSITIONS) {
@@ -448,21 +568,99 @@ function generateDraftClass(seasonYear, rng, nextId) {
   return prospects;
 }
 
-/** Calendário balanceado (método do círculo): cada time enfrenta 14 dos 15 rivais. */
-function generateSchedule(teamIds, weeks, rng) {
-  const ids = shuffle(rng, teamIds);
-  const n = ids.length;
-  /** @type {Fixture[]} */
-  const fixtures = [];
-  for (let r = 0; r < weeks; r++) {
-    for (let i = 0; i < n / 2; i++) {
-      const a = ids[i], b = ids[n - 1 - i];
-      const aHome = (r + i) % 2 === 0;
-      fixtures.push({ id: `w${r + 1}-g${i + 1}`, week: r + 1, homeId: aHome ? a : b, awayId: aHome ? b : a, neutral: false, result: null });
+/**
+ * Confrontos da temporada pela fórmula da NFL (17 jogos por time):
+ *  6 contra a própria divisão (ida e volta) · 4 contra uma divisão da conferência (rodízio de 3 anos)
+ *  4 contra uma divisão da outra conferência (rodízio de 4 anos) · 2 contra os de mesma colocação
+ *  nas outras duas divisões da conferência · 1 interconferência por colocação (17º jogo).
+ * @param {{id:string, conference:Conference, division:Division}[]} teams
+ * @param {number} year @param {Record<string, number>} places colocação 0..3 na divisão
+ * @returns {{homeId:string, awayId:string}[]}
+ */
+function generateNflMatchups(teams, year, places) {
+  const div = (conf, d) => teams.filter((t) => t.conference === conf && t.division === DIVISIONS[d])
+    .sort((a, b) => places[a.id] - places[b.id]).map((t) => t.id);
+  /** @type {{homeId:string, awayId:string}[]} */
+  const games = [];
+  const add = (homeId, awayId) => games.push({ homeId, awayId });
+  /** Cada time joga 2 em casa e 2 fora contra os 4 da outra divisão. */
+  const crossDivision = (A, B, salt) => {
+    for (let p = 0; p < 4; p++) for (let q = 0; q < 4; q++) ((p + q + salt) % 2 === 0 ? add(A[p], B[q]) : add(B[q], A[p]));
+  };
+  const PAIRINGS = [[[0, 1], [2, 3]], [[0, 2], [1, 3]], [[0, 3], [1, 2]]];
+  const intra = year % 3;
+  for (const conf of /** @type {Conference[]} */ (['AFC', 'NFC'])) {
+    for (let d = 0; d < 4; d++) {
+      const ids = div(conf, d);
+      for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++) { add(ids[i], ids[j]); add(ids[j], ids[i]); }
     }
-    ids.splice(1, 0, ids.pop());
+    for (const [a, b] of PAIRINGS[intra]) crossDivision(div(conf, a), div(conf, b), year);
+    // Jogos por colocação: as duas outras combinações de divisões formam um ciclo de 4;
+    // orientado em ciclo, cada divisão recebe uma vez e visita uma vez.
+    const others = PAIRINGS.filter((_, i) => i !== intra);
+    const partner = (pairing, d) => { const p = pairing.find((x) => x.includes(d)); return p[0] === d ? p[1] : p[0]; };
+    const cycle = [0];
+    for (let k = 0; k < 3; k++) cycle.push(partner(others[k % 2], cycle[k]));
+    for (let i = 0; i < 4; i++) {
+      let host = cycle[i], guest = cycle[(i + 1) % 4];
+      if (year % 2) [host, guest] = [guest, host];
+      for (let p = 0; p < 4; p++) add(div(conf, host)[p], div(conf, guest)[p]);
+    }
   }
-  return fixtures;
+  for (let d = 0; d < 4; d++) {
+    crossDivision(div('AFC', d), div('NFC', (d + year) % 4), year + 1);
+    const afc = div('AFC', d), nfc = div('NFC', (d + year + 2) % 4);
+    for (let p = 0; p < 4; p++) (year % 2 === 0 ? add(afc[p], nfc[p]) : add(nfc[p], afc[p]));
+  }
+  return games;
+}
+
+/**
+ * Distribui os confrontos em semanas: cada time tem exatamente uma semana de folga (bye)
+ * entre as semanas 5 e 14. Emparelhamento guloso "mais restrito primeiro", com reinícios.
+ * @returns {Fixture[]}
+ */
+function assignWeeks(games, teamIds, weeks, rng) {
+  const [byeFrom, byeTo] = LEAGUE_RULES.BYE_WEEKS;
+  for (let attempt = 0; attempt < 500; attempt++) {
+    // Byes em pares: 16 pares espalhados pelas 10 semanas permitidas.
+    const byeWeek = {};
+    const pairs = shuffle(rng, teamIds);
+    const slots = shuffle(rng, Array.from({ length: pairs.length / 2 }, (_, i) => byeFrom + (i % (byeTo - byeFrom + 1))));
+    for (let i = 0; i < pairs.length; i += 2) { byeWeek[pairs[i]] = slots[i / 2]; byeWeek[pairs[i + 1]] = slots[i / 2]; }
+    const pool = games.map((g) => ({ ...g, used: false }));
+    /** @type {Fixture[]} */
+    const fixtures = [];
+    const lastOpp = {};
+    let ok = true;
+    for (let w = 1; w <= weeks && ok; w++) {
+      const active = new Set(teamIds.filter((id) => byeWeek[id] !== w));
+      const options = (t) => pool.filter((g) => !g.used && (g.homeId === t || g.awayId === t) && active.has(g.homeId === t ? g.awayId : g.homeId));
+      let n = 0;
+      while (active.size) {
+        let best = null, bestOpts = null;
+        for (const t of active) {
+          const o = options(t);
+          if (!bestOpts || o.length < bestOpts.length || (o.length === bestOpts.length && rng() < 0.5)) { best = t; bestOpts = o; }
+        }
+        if (!bestOpts.length) { ok = false; break; }
+        const rematchPenalty = (g) => (lastOpp[best] === (g.homeId === best ? g.awayId : g.homeId) ? 100 : 0);
+        const g = [...bestOpts].sort((a, b) => rematchPenalty(a) - rematchPenalty(b) || options(a.homeId === best ? a.awayId : a.homeId).length - options(b.homeId === best ? b.awayId : b.homeId).length || rng() - 0.5)[0];
+        g.used = true;
+        active.delete(g.homeId); active.delete(g.awayId);
+        lastOpp[g.homeId] = g.awayId; lastOpp[g.awayId] = g.homeId;
+        n += 1;
+        fixtures.push({ id: `w${w}-g${n}`, week: w, homeId: g.homeId, awayId: g.awayId, neutral: false, result: null });
+      }
+    }
+    if (ok && pool.every((g) => g.used)) return fixtures;
+  }
+  throw new Error('Não foi possível montar o calendário.');
+}
+
+/** Calendário completo da temporada regular (18 semanas, 17 jogos + bye). */
+function generateSchedule(teams, year, places, rng) {
+  return assignWeeks(generateNflMatchups(teams, year, places), teams.map((t) => t.id), LEAGUE_RULES.REGULAR_SEASON_WEEKS, rng);
 }
 
 // --- 2.4 Força e escalação ----------------------------------------------------------
@@ -586,6 +784,24 @@ const winPct = (r) => { const g = r.w + r.l + r.t; return g ? (r.w + 0.5 * r.t) 
 function computeStandings(teams, ids) {
   return ids.map((id) => ({ team: teams[id], ...teams[id].record, pct: winPct(teams[id].record), diff: teams[id].record.pf - teams[id].record.pa }))
     .sort((a, b) => b.pct - a.pct || b.diff - a.diff || b.pf - a.pf || a.team.id.localeCompare(b.team.id));
+}
+
+/** Colocação (0..3) de cada time dentro da sua divisão. */
+function divisionPlaces(teams, teamOrder) {
+  const places = {};
+  for (const conf of ['AFC', 'NFC']) for (const d of DIVISIONS) {
+    computeStandings(teams, teamOrder.filter((id) => teams[id].conference === conf && teams[id].division === d))
+      .forEach((r, i) => { places[r.team.id] = i; });
+  }
+  return places;
+}
+/** Seeds 1..7: campeões de divisão (1–4) ordenados por campanha + 3 melhores restantes (wild cards). */
+function computePlayoffSeeds(teams, teamOrder, conf) {
+  const confIds = teamOrder.filter((id) => teams[id].conference === conf);
+  const winners = DIVISIONS.map((d) => computeStandings(teams, confIds.filter((id) => teams[id].division === d))[0].team.id);
+  const seeded = computeStandings(teams, winners).map((r) => r.team.id);
+  const wild = computeStandings(teams, confIds.filter((id) => !winners.includes(id))).slice(0, 3).map((r) => r.team.id);
+  return [...seeded, ...wild];
 }
 
 // --- 2.6 Motor de partida (play-by-play) --------------------------------------------
@@ -750,10 +966,10 @@ function applyPlayResult(ctx, yards, play) {
     const gained = 100 - m.ballOn;
     if (play.kind === 'RUN') {
       addStat(m, play.runner.id, 'td', 1);
-      pushEvent(m, { type: 'TOUCHDOWN', mode: 'RUN', teamId: offTeam.id, text: `🏈 TOUCHDOWN ${offTeam.abbr}! ${play.runner.name} corre ${gained} jardas até a end zone!` });
+      pushEvent(m, { type: 'TOUCHDOWN', mode: 'RUN', teamId: offTeam.id, text: `🏈 TOUCHDOWN ${offTeam.abbr}! ${play.runner.name} corre ${gained} jarda${gained === 1 ? '' : 's'} até a end zone!` });
     } else if (play.kind === 'PASS') {
       addStat(m, play.target.id, 'td', 1); addStat(m, play.passer.id, 'td', 1);
-      pushEvent(m, { type: 'TOUCHDOWN', mode: 'PASS', teamId: offTeam.id, text: `🏈 TOUCHDOWN ${offTeam.abbr}! ${play.passer.name} → ${play.target.name}, passe de ${gained} jardas!` });
+      pushEvent(m, { type: 'TOUCHDOWN', mode: 'PASS', teamId: offTeam.id, text: `🏈 TOUCHDOWN ${offTeam.abbr}! ${play.passer.name} → ${play.target.name}, passe de ${gained} jarda${gained === 1 ? '' : 's'}!` });
     }
     scoreTouchdown(ctx, ctx.offSide, ctx.offLineup.K[0]);
     return;
@@ -771,7 +987,7 @@ function applyPlayResult(ctx, yards, play) {
     else pushEvent(m, { type: 'PLAY', teamId: offTeam.id, text: `${sit} ${play.runner.name} corre para ${yards} jarda${Math.abs(yards) === 1 ? '' : 's'}.` });
   } else if (play.kind === 'PASS') {
     if (yards >= 20) pushEvent(m, { type: 'BIG_PLAY', yards, teamId: offTeam.id, text: `⚡ BIG PLAY! ${play.passer.name} acha ${play.target.name} (${offTeam.abbr}) para ${yards} jardas!` });
-    else pushEvent(m, { type: 'PLAY', teamId: offTeam.id, text: `${sit} ${play.passer.name} completa para ${play.target.name}, ${yards} jardas.` });
+    else pushEvent(m, { type: 'PLAY', teamId: offTeam.id, text: `${sit} ${play.passer.name} completa para ${play.target.name}, ${yards} jarda${Math.abs(yards) === 1 ? '' : 's'}.` });
   } else if (play.kind === 'INCOMPLETE') {
     pushEvent(m, { type: 'PLAY', teamId: offTeam.id, text: `${sit} ${play.passer.name} lança para ${play.target.name}: incompleto.` });
   }
@@ -789,7 +1005,7 @@ function resolveRun(ctx) {
   const { m, rng, offR, defR, offLineup, defTeam } = ctx;
   const qb = offLineup.QB[0].player;
   const runner = rng() < (qb.trait === 'ELUSIVE' ? 0.12 : 0.05) ? qb : offLineup.RB[0].player;
-  const adv = (offR.rushing - defR.runDef) / 125 + ctx.synergy;
+  const adv = (offR.rushing - defR.runDef) / 175 + ctx.synergy;
   let yards = Math.max(-4, Math.round(gauss(rng, 4.0 + adv * 14, 3.4)));
   const blitz = defTeam.tactic.defense === 'BLITZ_HEAVY';
   const breakChance = 0.035 + Math.max(0, adv) * 0.06 + (runner.trait === 'ELUSIVE' ? 0.035 : 0) + (blitz ? 0.015 : 0);
@@ -815,7 +1031,7 @@ function resolvePass(ctx, deep) {
   const cover2 = defTeam.tactic.defense === 'COVER_2_ZONE';
   // 1) Pressão / sack
   const pressure = defR.passRush / Math.max(30, offR.passBlock);
-  let sackChance = 0.06 * pressure * pressure * (blitz ? 1.6 : 1) * (deep ? 1.25 : 0.8) * (qb.trait === 'ELUSIVE' ? 0.7 : 1);
+  let sackChance = 0.055 * Math.pow(pressure, 1.4) * (blitz ? 1.6 : 1) * (deep ? 1.25 : 0.8) * (qb.trait === 'ELUSIVE' ? 0.7 : 1);
   if (offTeam.tactic.offense === 'WEST_COAST') sackChance *= 0.8;
   if (rng() < clamp(sackChance, 0.015, 0.2)) {
     const sacker = pickDefender(ctx, ['DL', 'LB'], (p) => (p.trait === 'PASS_RUSHER' ? 2.2 : 1));
@@ -828,7 +1044,7 @@ function resolvePass(ctx, deep) {
   }
   // 2) Interceptação
   const coverageRatio = defR.coverage / Math.max(30, offR.passing);
-  let intChance = (deep ? 0.04 : 0.015) * coverageRatio * coverageRatio * (cover2 && deep ? 1.3 : 1) * (offTeam.tactic.offense === 'AIR_RAID' ? 1.15 : 1);
+  let intChance = (deep ? 0.04 : 0.015) * Math.pow(coverageRatio, 1.4) * (cover2 && deep ? 1.3 : 1) * (offTeam.tactic.offense === 'AIR_RAID' ? 1.15 : 1);
   if (qb.trait === 'CLUTCH' && m.quarter >= 4) intChance *= 0.75;
   if (rng() < clamp(intChance, 0.005, 0.09)) {
     const picker = pickDefender(ctx, ['DB', 'LB'], (p) => (p.position === 'DB' ? 2 : 1) * (p.trait === 'LOCKDOWN' ? 1.8 : 1));
@@ -849,7 +1065,7 @@ function resolvePass(ctx, deep) {
   }
   // 3) Passe completo / incompleto
   const target = pickReceiver(ctx, deep);
-  const adv = (offR.passing - defR.coverage) / 125 + ctx.synergy;
+  const adv = (offR.passing - defR.coverage) / 175 + ctx.synergy;
   const lockdowns = ctx.defLineup.DB.filter((s) => s.player.trait === 'LOCKDOWN').length;
   let comp = (deep ? 0.42 : 0.67) + adv * 0.6 + (target.trait === 'GLUE_HANDS' ? 0.06 : 0)
     + (deep && qb.trait === 'CANNON_ARM' ? 0.06 : 0) - lockdowns * 0.03 - (blitz ? 0.03 : 0) - (cover2 && deep ? 0.06 : 0);
@@ -1035,12 +1251,13 @@ function aiDraftChoice(prospects, roster) {
 // --- 2.8 Consultas derivadas --------------------------------------------------------
 /** @param {GameState} state */
 const rosterOf = (state, teamId) => Object.values(state.players).filter((p) => p.teamId === teamId);
-const isPlayablePhase = (phase) => ['REGULAR_SEASON', 'PLAYOFFS_DIVISIONAL', 'PLAYOFFS_CONFERENCE', 'SUPER_BOWL'].includes(phase.kind);
+const PLAYOFF_ROUNDS = /** @type {const} */ (['PLAYOFFS_WILDCARD', 'PLAYOFFS_DIVISIONAL', 'PLAYOFFS_CONFERENCE', 'SUPER_BOWL']);
+const isPlayablePhase = (phase) => phase.kind === 'REGULAR_SEASON' || PLAYOFF_ROUNDS.includes(phase.kind);
 /** @param {GameState} state @returns {Fixture[]} */
 function currentFixtures(state) {
   const ph = state.phase;
   if (ph.kind === 'REGULAR_SEASON') return state.schedule.filter((f) => f.week === ph.week);
-  if (ph.kind === 'PLAYOFFS_DIVISIONAL' || ph.kind === 'PLAYOFFS_CONFERENCE' || ph.kind === 'SUPER_BOWL') return ph.fixtures;
+  if ('fixtures' in ph) return ph.fixtures;
   return [];
 }
 function phaseLabel(phase, year) {
@@ -1114,25 +1331,29 @@ function createNewGame(userTeamId, rng) {
   const players = {};
   for (const seed of TEAM_SEEDS) {
     teams[seed.id] = {
-      id: seed.id, city: seed.city, name: seed.name, abbr: seed.id, conference: /** @type {Conference} */ (seed.conference),
+      id: seed.id, city: seed.city, name: seed.name, abbr: seed.id, conference: /** @type {Conference} */ (seed.conference), division: /** @type {Division} */ (seed.division),
       colors: { primary: seed.primary, secondary: seed.secondary }, tactic: { offense: 'BALANCED', defense: 'BALANCED', fourthDown: 'CONSERVATIVE' },
       cash: LEAGUE_RULES.STARTING_CASH, fanBase: seed.fans, record: emptyRecord(),
     };
-    generateTeamRoster(rng, nextId, seed.id, seed.base).forEach((p) => { players[p.id] = p; });
+    generateTeamRoster(rng, nextId, seed.id, seed.base, seed.stars).forEach((p) => { players[p.id] = p; });
   }
-  generateFreeAgents(rng, nextId, 28).forEach((p) => { players[p.id] = p; });
+  generateFreeAgents(rng, nextId, 50).forEach((p) => { players[p.id] = p; });
   const teamOrder = TEAM_SEEDS.map((t) => t.id);
+  // Primeiro calendário usa a classificação de 2024 (ordem dos times em TEAM_SEEDS por divisão).
+  const lastPlaces = {};
+  for (const seed of TEAM_SEEDS) lastPlaces[seed.id] = TEAM_SEEDS.filter((t) => t.conference === seed.conference && t.division === seed.division).indexOf(seed);
   /** @type {GameState} */
   const s = {
     version: LEAGUE_RULES.SAVE_VERSION, seasonYear: LEAGUE_RULES.FIRST_SEASON, userTeamId, teams, teamOrder, players,
-    schedule: generateSchedule(teamOrder, LEAGUE_RULES.REGULAR_SEASON_WEEKS, rng), phase: { kind: 'REGULAR_SEASON', week: 1 },
-    liveRound: null, boardMorale: LEAGUE_RULES.STARTING_BOARD, news: [], ledger: [], history: [], playoffResults: [], nextId: holder.nextId,
+    schedule: generateSchedule(Object.values(teams), LEAGUE_RULES.FIRST_SEASON, lastPlaces, rng), phase: { kind: 'REGULAR_SEASON', week: 1 },
+    liveRound: null, boardMorale: LEAGUE_RULES.STARTING_BOARD, news: [], ledger: [], history: [], playoffResults: [], lastPlaces, nextId: holder.nextId,
   };
   teamOrder.forEach((id) => applyAutoLineup(s, id));
   prepareAiTeams(s);
   s.teams[userTeamId].tactic = chooseAiTactic(rosterOf(s, userTeamId));
   const t = s.teams[userTeamId];
-  pushNews(s, `Bem-vindo ao comando do ${t.city} ${t.name}! A diretoria espera playoffs nesta temporada.`, 'good');
+  const qb = rosterOf(s, userTeamId).filter((p) => p.position === 'QB').sort((a, b) => b.ovr - a.ovr)[0];
+  pushNews(s, `Bem-vindo ao comando do ${t.city} ${t.name}! Com ${qb.name} sob center, a diretoria espera playoffs nesta temporada.`, 'good');
   return s;
 }
 
@@ -1340,17 +1561,26 @@ function advancePhase(s) {
   const name = (id) => `${s.teams[id].city} ${s.teams[id].name}`;
   if (ph.kind === 'REGULAR_SEASON') {
     if (ph.week < LEAGUE_RULES.REGULAR_SEASON_WEEKS) { s.phase = { kind: 'REGULAR_SEASON', week: ph.week + 1 }; return; }
-    const seedOf = (conf) => computeStandings(s.teams, s.teamOrder.filter((id) => s.teams[id].conference === conf)).slice(0, LEAGUE_RULES.PLAYOFF_SEEDS).map((r) => r.team.id);
-    const seeds = { AFC: seedOf('AFC'), NFC: seedOf('NFC') };
-    const fixtures = ['AFC', 'NFC'].flatMap((c) => [
-      makePlayoffFixture(`po-div-${c}-1`, 15, seeds[c][0], seeds[c][3]),
-      makePlayoffFixture(`po-div-${c}-2`, 15, seeds[c][1], seeds[c][2]),
-    ]);
-    s.phase = { kind: 'PLAYOFFS_DIVISIONAL', seeds, fixtures };
-    const made = seeds.AFC.includes(user) || seeds.NFC.includes(user);
+    const seeds = { AFC: computePlayoffSeeds(s.teams, s.teamOrder, 'AFC'), NFC: computePlayoffSeeds(s.teams, s.teamOrder, 'NFC') };
+    // Wild Card: 2x7, 3x6, 4x5 — o seed 1 folga.
+    const fixtures = ['AFC', 'NFC'].flatMap((c) => [[1, 6], [2, 5], [3, 4]].map(([h, a], i) => makePlayoffFixture(`po-wc-${c}-${i + 1}`, 19, seeds[c][h], seeds[c][a])));
+    s.phase = { kind: 'PLAYOFFS_WILDCARD', seeds, fixtures };
+    const userSeed = Math.max(seeds.AFC.indexOf(user), seeds.NFC.indexOf(user));
+    const made = userSeed >= 0;
     s.boardMorale = clamp(s.boardMorale + (made ? 10 : -15), 0, 100);
-    pushNews(s, made ? '🎉 Classificados para os PLAYOFFS! A diretoria está satisfeita.' : '😞 Fora dos playoffs. A diretoria cobra resultados.', made ? 'good' : 'bad');
-    pushNews(s, `Playoffs definidos — AFC: ${seeds.AFC.join(', ')} · NFC: ${seeds.NFC.join(', ')}`);
+    pushNews(s, made ? `🎉 Classificados para os PLAYOFFS como seed #${userSeed + 1}!${userSeed === 0 ? ' Folga no Wild Card e mando de campo garantido.' : ''}` : '😞 Fora dos playoffs. A diretoria cobra resultados.', made ? 'good' : 'bad');
+    pushNews(s, `Playoffs definidos — AFC: ${seeds.AFC.map((id, i) => `${i + 1}.${id}`).join(' ')} · NFC: ${seeds.NFC.map((id, i) => `${i + 1}.${id}`).join(' ')}`);
+    return;
+  }
+  if (ph.kind === 'PLAYOFFS_WILDCARD') {
+    // Divisional: o seed 1 recebe o pior seed restante; os outros dois se enfrentam.
+    const fixtures = ['AFC', 'NFC'].flatMap((c) => {
+      const alive = [ph.seeds[c][0], ...ph.fixtures.filter((f) => f.id.startsWith(`po-wc-${c}`)).map(fixtureWinner)]
+        .sort((a, b) => ph.seeds[c].indexOf(a) - ph.seeds[c].indexOf(b));
+      return [makePlayoffFixture(`po-div-${c}-1`, 20, alive[0], alive[3]), makePlayoffFixture(`po-div-${c}-2`, 20, alive[1], alive[2])];
+    });
+    s.phase = { kind: 'PLAYOFFS_DIVISIONAL', seeds: ph.seeds, fixtures };
+    pushNews(s, `Divisional Round: ${fixtures.map((f) => `${f.awayId} @ ${f.homeId}`).join(' · ')}`);
     return;
   }
   if (ph.kind === 'PLAYOFFS_DIVISIONAL') {
@@ -1358,7 +1588,7 @@ function advancePhase(s) {
       const w1 = fixtureWinner(ph.fixtures.find((f) => f.id === `po-div-${c}-1`));
       const w2 = fixtureWinner(ph.fixtures.find((f) => f.id === `po-div-${c}-2`));
       const [home, away] = ph.seeds[c].indexOf(w1) < ph.seeds[c].indexOf(w2) ? [w1, w2] : [w2, w1];
-      return makePlayoffFixture(`po-conf-${c}`, 16, home, away);
+      return makePlayoffFixture(`po-conf-${c}`, 21, home, away);
     });
     s.phase = { kind: 'PLAYOFFS_CONFERENCE', seeds: ph.seeds, fixtures };
     pushNews(s, `Finais de Conferência: ${fixtures.map((f) => `${f.awayId} @ ${f.homeId}`).join(' · ')}`);
@@ -1368,7 +1598,7 @@ function advancePhase(s) {
     const afc = fixtureWinner(ph.fixtures.find((f) => f.id === 'po-conf-AFC'));
     const nfc = fixtureWinner(ph.fixtures.find((f) => f.id === 'po-conf-NFC'));
     const [home, away] = s.seasonYear % 2 === 0 ? [afc, nfc] : [nfc, afc];
-    s.phase = { kind: 'SUPER_BOWL', seeds: ph.seeds, fixtures: [makePlayoffFixture('po-sb', 17, home, away, true)] };
+    s.phase = { kind: 'SUPER_BOWL', seeds: ph.seeds, fixtures: [makePlayoffFixture('po-sb', 22, home, away, true)] };
     pushNews(s, `🏟️ SUPER BOWL definido: ${name(afc)} (AFC) x ${name(nfc)} (NFC)!`, 'good');
     return;
   }
@@ -1459,6 +1689,7 @@ function startOffseason(state, rng) {
   s.players = aged.players;
   aged.retired.filter((p) => userBefore.includes(p.id)).forEach((p) => pushNews(s, `👴 ${p.name} (${p.position}, ${p.age} anos) anunciou a aposentadoria.`));
   pushNews(s, `${aged.retired.length} jogadores se aposentaram na liga.`);
+  s.lastPlaces = divisionPlaces(s.teams, s.teamOrder);
   for (const id of s.teamOrder) s.teams[id].record = emptyRecord();
   const prospects = generateDraftClass(s.seasonYear + 1, rng, makeIdGen(s));
   prospects.forEach((p) => { s.players[p.id] = p; });
@@ -1508,10 +1739,12 @@ function startNewSeason(state, rng) {
   }
   // Renovação do mercado: veteranos sem clube se aposentam, novos free agents surgem.
   for (const p of Object.values(s.players)) if (p.teamId === null && (p.age >= 34 || rng() < 0.3)) delete s.players[p.id];
-  generateFreeAgents(rng, makeIdGen(s), 24).forEach((p) => { s.players[p.id] = p; });
+  // Mantém o mercado com ~60 free agents.
+  const freeAgents = Object.values(s.players).filter((p) => p.teamId === null).length;
+  generateFreeAgents(rng, makeIdGen(s), Math.max(10, 60 - freeAgents)).forEach((p) => { s.players[p.id] = p; });
   for (const p of Object.values(s.players)) { p.energy = 100; p.injuryWeeks = 0; }
   fillLineupGaps(s, user);
-  s.schedule = generateSchedule(s.teamOrder, LEAGUE_RULES.REGULAR_SEASON_WEEKS, rng);
+  s.schedule = generateSchedule(Object.values(s.teams), s.seasonYear, s.lastPlaces, rng);
   s.phase = { kind: 'REGULAR_SEASON', week: 1 };
   prepareAiTeams(s);
   const cap = processSalaryCap(s.teams[user], rosterOf(s, user));
@@ -1616,7 +1849,7 @@ function parseSave(raw) {
     const save = JSON.parse(raw);
     if (!save || save.version !== LEAGUE_RULES.SAVE_VERSION) return null;
     const st = save.state;
-    const ok = st && typeof st.seasonYear === 'number' && st.teams && st.players && Array.isArray(st.schedule)
+    const ok = st && typeof st.seasonYear === 'number' && st.teams && st.players && Array.isArray(st.schedule) && st.lastPlaces
       && st.phase && typeof st.phase.kind === 'string' && st.teams[st.userTeamId];
     return ok ? save : null;
   } catch { return null; }
@@ -1718,27 +1951,28 @@ function showToast(text, kind = 'info') {
 
 // --- 4.2 Seleção de franquia --------------------------------------------------------
 function renderTeamSelect() {
-  const col = (conf) => TEAM_SEEDS.filter((t) => t.conference === conf).map((t) => {
-    const stars = '★'.repeat(Math.round((t.base - 66) / 3)).padEnd(4, '☆');
-    return `<button ${uiAttr({ type: 'CHOOSE_TEAM', teamId: t.id })} class="text-left rounded-lg overflow-hidden border-2 border-slate-700 hover:border-white transition bg-slate-900">
-      <div class="px-3 py-3 flex items-center gap-3" style="background:${t.primary};color:${textOn(t.primary)};border-bottom:4px solid ${t.secondary}">
-        <span class="w-10 h-10 rounded-full flex items-center justify-center font-black text-xs" style="background:${t.secondary};color:${textOn(t.secondary)}">${t.id}</span>
-        <div><div class="text-xs opacity-80">${t.city}</div><div class="font-extrabold text-lg leading-tight">${t.name}</div></div>
+  const teamBtn = (t) => {
+    const qb = parseStar(t.stars.find((l) => l.startsWith('QB|')));
+    const stars = '★'.repeat(clamp(Math.round((t.base - 64) / 3), 1, 4)).padEnd(4, '☆');
+    return `<button ${uiAttr({ type: 'CHOOSE_TEAM', teamId: t.id })} class="text-left rounded-md overflow-hidden border-2 border-slate-700 hover:border-white focus-visible:border-white transition bg-slate-900 min-w-0">
+      <div class="px-2.5 py-2 flex items-center gap-2" style="background:${t.primary};color:${textOn(t.primary)};border-bottom:3px solid ${t.secondary}">
+        <span class="w-9 h-9 shrink-0 rounded-full flex items-center justify-center font-black text-[11px]" style="background:${t.secondary};color:${textOn(t.secondary)}">${t.id}</span>
+        <div class="min-w-0"><div class="text-[10px] opacity-80 truncate">${t.city}</div><div class="font-extrabold leading-tight truncate">${t.name}</div></div>
       </div>
-      <div class="px-3 py-2 text-xs flex justify-between text-slate-300"><span>Força <span class="text-amber-300">${stars}</span></span><span>Torcida ${Math.round(t.fans * 100)}%</span></div>
+      <div class="px-2.5 py-1.5 text-[11px] text-slate-300 flex justify-between gap-2"><span class="truncate">QB ${qb.name}</span><span class="text-amber-300 shrink-0">${stars}</span></div>
     </button>`;
-  }).join('');
-  return `<div class="max-w-5xl mx-auto px-4 py-10">
+  };
+  const conf = (c) => `<div><h2 class="font-black text-lg mb-3 ${c === 'AFC' ? 'text-red-400' : 'text-sky-400'}">${c === 'AFC' ? 'AFC — American Football Conference' : 'NFC — National Football Conference'}</h2>
+    <div class="grid sm:grid-cols-2 gap-4">${DIVISIONS.map((d) => `<div><div class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">${c} ${d}</div>
+      <div class="grid gap-2">${TEAM_SEEDS.filter((t) => t.conference === c && t.division === d).map(teamBtn).join('')}</div></div>`).join('')}</div></div>`;
+  return `<div class="max-w-6xl mx-auto px-4 py-8">
     <div class="text-center mb-8">
       <div class="text-5xl mb-2">🏈</div>
       <h1 class="text-4xl font-black tracking-tight">Gridiron<span class="text-amber-400">Foot</span></h1>
-      <p class="text-slate-400 mt-2">Gerenciador de futebol americano no espírito do Brasfoot. Escolha sua franquia.</p>
+      <p class="text-slate-400 mt-2">Gerenciador de futebol americano no espírito do Brasfoot. Escolha sua franquia da NFL.</p>
     </div>
-    <div class="grid md:grid-cols-2 gap-6">
-      <div><h2 class="font-bold text-red-400 mb-3">AFC — American Football Conference</h2><div class="grid sm:grid-cols-2 gap-3">${col('AFC')}</div></div>
-      <div><h2 class="font-bold text-sky-400 mb-3">NFC — National Football Conference</h2><div class="grid sm:grid-cols-2 gap-3">${col('NFC')}</div></div>
-    </div>
-    <p class="text-center text-xs text-slate-500 mt-8">Progresso salvo automaticamente no navegador.</p>
+    <div class="grid lg:grid-cols-2 gap-8">${conf('AFC')}${conf('NFC')}</div>
+    <p class="text-center text-xs text-slate-500 mt-8">Elencos baseados no início da temporada 2025 (estrelas reais; reservas gerados). Jogo de fã, sem afiliação com a NFL. Progresso salvo no navegador.</p>
   </div>`;
 }
 
@@ -1748,7 +1982,7 @@ function primaryAction(s) {
   if (s.liveRound) return null;
   if (isPlayablePhase(ph)) {
     const plays = currentFixtures(s).some((f) => f.homeId === s.userTeamId || f.awayId === s.userTeamId);
-    return { label: plays ? (ph.kind === 'REGULAR_SEASON' ? '▶ Jogar Semana' : '▶ Jogar Playoff') : '▶ Simular Rodada', action: { type: 'PLAY_WEEK' } };
+    return { label: plays ? (ph.kind === 'REGULAR_SEASON' ? '▶ Jogar Semana' : '▶ Jogar Playoff') : ph.kind === 'REGULAR_SEASON' ? '▶ Simular Rodada (bye)' : '▶ Simular Rodada', action: { type: 'PLAY_WEEK' } };
   }
   if (ph.kind === 'SEASON_RECAP') return { label: '🎓 Iniciar Offseason', action: { type: 'GAME', game: { type: 'START_OFFSEASON' }, view: 'draft' } };
   if (ph.kind === 'OFFSEASON_DRAFT') {
@@ -1764,7 +1998,7 @@ function renderHeader(s) {
   const cap = processSalaryCap(t, roster);
   const next = currentFixtures(s).find((f) => f.homeId === t.id || f.awayId === t.id);
   const nextTxt = next ? (next.neutral ? `vs ${s.teams[next.homeId === t.id ? next.awayId : next.homeId].abbr} (neutro)` : next.homeId === t.id ? `vs ${s.teams[next.awayId].abbr} (casa)` : `@ ${s.teams[next.homeId].abbr} (fora)`)
-    : isPlayablePhase(s.phase) ? 'Eliminado / sem jogo' : '—';
+    : s.phase.kind === 'REGULAR_SEASON' ? 'BYE (folga)' : isPlayablePhase(s.phase) ? 'Eliminado / sem jogo' : '—';
   const board = s.boardMorale;
   const boardColor = board > 60 ? '#22c55e' : board > 30 ? '#eab308' : '#ef4444';
   const act = primaryAction(s);
@@ -1842,7 +2076,7 @@ function renderRoster(s) {
         <th>Tit.</th>${th('pos', 'Pos')}${th('name', 'Nome')}${th('age', 'Idade')}${th('ovr', 'OVR')}${th('energy', 'Energia')}${th('morale', 'Moral')}${th('salary', 'Salário')}<th>Característica</th><th>Status</th><th>Temporada</th>
       </tr></thead><tbody>${rows}</tbody></table>
     </div>
-    <p class="text-xs text-slate-500 mt-2">Clique na ★ para escalar/desescalar. Se a posição estiver cheia, sai o titular de menor rendimento (OVR × energia). Elenco: ${roster.length}/${LEAGUE_RULES.MAX_ROSTER}.</p>`;
+    <p class="text-xs text-slate-500 mt-2">Clique na ★ para escalar/desescalar. Se a posição estiver cheia, sai o titular de menor rendimento (OVR × energia). Elenco: ${roster.length}/${LEAGUE_RULES.MAX_ROSTER}. Jogadores reais vêm do início da temporada 2025; os demais são gerados.</p>`;
 }
 
 // --- 4.5 Táticas --------------------------------------------------------------------
@@ -1888,16 +2122,29 @@ function renderTactics(s) {
 }
 
 // --- 4.6 Classificação --------------------------------------------------------------
-function standingsTable(s, conf) {
-  const rows = computeStandings(s.teams, s.teamOrder.filter((id) => s.teams[id].conference === conf));
-  return `<table class="dense w-full text-sm"><thead class="text-xs uppercase text-slate-400 bg-slate-800/80"><tr>
-    <th class="text-left">#</th><th class="text-left">Time</th><th>V</th><th>D</th><th>E</th><th>PF</th><th>PS</th><th>Saldo</th><th>%</th></tr></thead><tbody>
-    ${rows.map((r, i) => `<tr class="${r.team.id === s.userTeamId ? 'font-black text-amber-200' : ''} ${i === LEAGUE_RULES.PLAYOFF_SEEDS - 1 ? 'border-b-2 border-emerald-600' : ''}">
-      <td class="${i < LEAGUE_RULES.PLAYOFF_SEEDS ? 'text-emerald-400 font-bold' : 'text-slate-500'}">${i + 1}</td>
-      <td class="text-left"><div class="flex items-center gap-2">${teamChip(r.team)} <span class="hidden sm:inline">${esc(teamName(r.team))}</span></div></td>
-      <td class="text-center">${r.w}</td><td class="text-center">${r.l}</td><td class="text-center">${r.t}</td><td class="text-center">${r.pf}</td><td class="text-center">${r.pa}</td>
-      <td class="text-center ${r.diff > 0 ? 'text-emerald-400' : r.diff < 0 ? 'text-red-400' : ''}">${r.diff > 0 ? '+' : ''}${r.diff}</td><td class="text-center">${r.pct.toFixed(3).replace(/^0/, '')}</td></tr>`).join('')}
-  </tbody></table>`;
+const recordTxt = (r) => `${r.w}-${r.l}${r.t ? `-${r.t}` : ''}`;
+function divisionTable(s, conf, division, seeds) {
+  const rows = computeStandings(s.teams, s.teamOrder.filter((id) => s.teams[id].conference === conf && s.teams[id].division === division));
+  return `<div class="min-w-0"><div class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">${conf} ${division}</div>
+    <div class="overflow-x-auto scroll-thin"><table class="dense w-full text-sm"><thead class="text-[10px] uppercase text-slate-500"><tr>
+      <th class="text-left">Time</th><th>V</th><th>D</th><th>E</th><th>PF</th><th>PS</th><th>Saldo</th><th></th></tr></thead><tbody>
+      ${rows.map((r, i) => { const seed = seeds.indexOf(r.team.id); return `<tr class="${r.team.id === s.userTeamId ? 'font-black text-amber-200' : ''}">
+        <td class="text-left"><div class="flex items-center gap-2">${teamChip(r.team)}<span class="hidden sm:inline truncate">${esc(r.team.name)}</span>${i === 0 && r.w + r.l + r.t > 0 ? '<span class="text-[10px] text-amber-300" title="Líder da divisão">♛</span>' : ''}</div></td>
+        <td class="text-center tabular-nums">${r.w}</td><td class="text-center tabular-nums">${r.l}</td><td class="text-center tabular-nums">${r.t}</td>
+        <td class="text-center tabular-nums">${r.pf}</td><td class="text-center tabular-nums">${r.pa}</td>
+        <td class="text-center tabular-nums ${r.diff > 0 ? 'text-emerald-400' : r.diff < 0 ? 'text-red-400' : ''}">${r.diff > 0 ? '+' : ''}${r.diff}</td>
+        <td class="text-center">${seed >= 0 ? `<span class="text-[10px] font-black px-1.5 py-0.5 rounded ${seed < 4 ? 'bg-emerald-800 text-emerald-200' : 'bg-sky-900 text-sky-200'}">${seed + 1}</span>` : ''}</td></tr>`; }).join('')}
+    </tbody></table></div></div>`;
+}
+function playoffPicture(s, conf, seeds) {
+  const confIds = s.teamOrder.filter((id) => s.teams[id].conference === conf);
+  const hunt = computeStandings(s.teams, confIds.filter((id) => !seeds.includes(id))).slice(0, 3);
+  const row = (id, i) => `<div class="flex items-center gap-2 text-xs py-0.5 ${id === s.userTeamId ? 'text-amber-200 font-bold' : ''}">
+      <span class="w-5 text-right font-black ${i < 4 ? 'text-emerald-400' : 'text-sky-400'}">${i + 1}</span>${teamChip(s.teams[id])}
+      <span class="flex-1 truncate">${esc(s.teams[id].name)}</span><span class="tabular-nums">${recordTxt(s.teams[id].record)}</span>
+      <span class="w-16 text-right text-slate-500">${i === 0 ? 'bye' : i < 4 ? 'divisão' : 'wild card'}</span></div>`;
+  return `${seeds.map(row).join('')}<div class="border-t border-slate-700 mt-1 pt-1 text-[10px] uppercase text-slate-500">Na briga</div>
+    ${hunt.map((r) => `<div class="flex items-center gap-2 text-xs py-0.5 text-slate-400 ${r.team.id === s.userTeamId ? 'text-amber-200 font-bold' : ''}"><span class="w-5"></span>${teamChip(r.team)}<span class="flex-1 truncate">${esc(r.team.name)}</span><span class="tabular-nums">${recordTxt(r)}</span><span class="w-16"></span></div>`).join('')}`;
 }
 function renderLeaders(s) {
   const all = Object.values(s.players).filter((p) => p.teamId);
@@ -1908,11 +2155,16 @@ function renderLeaders(s) {
   return `<div class="grid sm:grid-cols-2 lg:grid-cols-5 gap-4">${list('td', 'Touchdowns', 'TD')}${list('yds', 'Jardas', 'jd')}${list('sacks', 'Sacks', 'SK')}${list('ints', 'Interceptações', 'INT')}${list('fg', 'Field Goals', 'FG')}</div>`;
 }
 function renderStandings(s) {
-  return `<div class="grid lg:grid-cols-2 gap-4 mb-4">
-      ${card('<span class="text-red-400">AFC</span> — Classificação', `<div class="overflow-x-auto scroll-thin">${standingsTable(s, 'AFC')}</div>`)}
-      ${card('<span class="text-sky-400">NFC</span> — Classificação', `<div class="overflow-x-auto scroll-thin">${standingsTable(s, 'NFC')}</div>`)}
-    </div>
-    <p class="text-xs text-slate-500 mb-4">Os ${LEAGUE_RULES.PLAYOFF_SEEDS} primeiros de cada conferência avançam aos playoffs (1º x 4º, 2º x 3º). Desempate: % de vitórias, saldo, pontos feitos.</p>
+  const confBlock = (conf) => {
+    const seeds = 'seeds' in s.phase ? s.phase.seeds[conf] : computePlayoffSeeds(s.teams, s.teamOrder, conf);
+    const color = conf === 'AFC' ? 'text-red-400' : 'text-sky-400';
+    return `<div class="grid lg:grid-cols-3 gap-4 mb-4">
+      ${card(`<span class="${color}">${conf}</span> — ${'seeds' in s.phase ? 'Seeds dos playoffs' : 'Se a temporada acabasse hoje'}`, playoffPicture(s, conf, seeds))}
+      <div class="lg:col-span-2 rounded-lg border border-slate-700/80 bg-slate-900/70 p-3 grid sm:grid-cols-2 gap-4">${DIVISIONS.map((d) => divisionTable(s, conf, d, seeds)).join('')}</div>
+    </div>`;
+  };
+  return `${confBlock('AFC')}${confBlock('NFC')}
+    <p class="text-xs text-slate-500 mb-4">Playoffs: 7 times por conferência — os 4 campeões de divisão (seeds 1–4, o seed 1 folga no Wild Card) e os 3 melhores restantes (wild cards, seeds 5–7). Desempate simplificado: % de vitórias, saldo, pontos feitos.</p>
     ${card('⭐ Líderes da Temporada', renderLeaders(s))}
     ${s.history.length ? card('📜 Galeria de Campeões', s.history.map((h) => `<div class="flex items-center gap-2 text-sm py-1"><b class="w-12">${h.year}</b>🏆 ${teamChip(s.teams[h.championId])} ${esc(teamName(s.teams[h.championId]))} <span class="text-slate-500 text-xs">vice: ${h.runnerUpId} · seu time: ${h.userRecord.w}-${h.userRecord.l}-${h.userRecord.t}</span></div>`).join(''), 'mt-4') : ''}`;
 }
@@ -1922,45 +2174,51 @@ function fixtureRow(s, f) {
   const h = s.teams[f.homeId], a = s.teams[f.awayId];
   const res = f.result;
   const mine = f.homeId === s.userTeamId || f.awayId === s.userTeamId;
+  const seeds = 'seeds' in s.phase ? s.phase.seeds : null;
+  const seedOf = (id) => { if (!seeds || f.week < 19) return ''; const i = Math.max(seeds.AFC.indexOf(id), seeds.NFC.indexOf(id)); return i >= 0 ? `<span class="text-[10px] text-slate-500">${i + 1}</span>` : ''; };
   return `<div class="flex items-center gap-2 py-1 px-2 rounded text-sm ${mine ? 'bg-slate-700/50 font-bold' : ''}">
-    ${teamChip(a)}<span class="w-7 text-right font-black ${res && res.away > res.home ? 'text-white' : 'text-slate-400'}">${res ? res.away : ''}</span>
+    ${seedOf(a.id)}${teamChip(a)}<span class="w-7 text-right font-black tabular-nums ${res && res.away > res.home ? 'text-white' : 'text-slate-400'}">${res ? res.away : ''}</span>
     <span class="text-slate-500 text-xs">${f.neutral ? 'vs' : '@'}</span>
-    <span class="w-7 font-black ${res && res.home > res.away ? 'text-white' : 'text-slate-400'}">${res ? res.home : ''}</span>${teamChip(h)}
+    <span class="w-7 font-black tabular-nums ${res && res.home > res.away ? 'text-white' : 'text-slate-400'}">${res ? res.home : ''}</span>${teamChip(h)}${seedOf(h.id)}
     ${res ? '' : '<span class="text-xs text-slate-500 ml-1">a jogar</span>'}</div>`;
 }
 function renderBracket(s) {
   const ph = s.phase;
-  const rounds = [['PLAYOFFS_DIVISIONAL', 'Semifinais de Conferência'], ['PLAYOFFS_CONFERENCE', 'Finais de Conferência'], ['SUPER_BOWL', 'Super Bowl']];
-  const cols = rounds.map(([kind, label]) => {
+  const cols = PLAYOFF_ROUNDS.map((kind) => {
     const done = s.playoffResults.filter((f) => f.round === kind);
     const pending = 'fixtures' in ph && ph.kind === kind ? ph.fixtures.filter((f) => !f.result) : [];
     const list = [...done, ...pending];
-    return `<div><div class="text-xs font-bold uppercase text-slate-400 mb-2">${label}</div>${list.length ? list.map((f) => fixtureRow(s, f)).join('') : '<div class="text-xs text-slate-600">A definir</div>'}</div>`;
+    return `<div class="min-w-0"><div class="text-xs font-bold uppercase text-slate-400 mb-2">${PHASE_LABELS[kind]}</div>${list.length ? list.map((f) => fixtureRow(s, f)).join('') : '<div class="text-xs text-slate-600">A definir</div>'}</div>`;
   }).join('');
   const seeds = 'seeds' in ph ? ph.seeds : null;
-  return `<div class="grid md:grid-cols-3 gap-4">${cols}</div>${seeds ? `<div class="text-xs text-slate-400 mt-3">Seeds — AFC: ${seeds.AFC.map((id, i) => `${i + 1}. ${id}`).join(' · ')} | NFC: ${seeds.NFC.map((id, i) => `${i + 1}. ${id}`).join(' · ')}</div>` : ''}`;
+  return `<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">${cols}</div>${seeds ? `<div class="text-xs text-slate-400 mt-3">Seeds — AFC: ${seeds.AFC.map((id, i) => `${i + 1}. ${id}`).join(' · ')} | NFC: ${seeds.NFC.map((id, i) => `${i + 1}. ${id}`).join(' · ')}</div>` : ''}`;
 }
 function renderSchedule(s) {
   const user = s.userTeamId;
-  const mine = s.schedule.filter((f) => f.homeId === user || f.awayId === user);
   const currentWeek = s.phase.kind === 'REGULAR_SEASON' ? s.phase.week : LEAGUE_RULES.REGULAR_SEASON_WEEKS;
   const week = ui.scheduleWeek ?? currentWeek;
-  const list = mine.map((f) => {
+  const rowCls = (w) => `w-full flex items-center gap-2 text-sm py-1 px-2 rounded hover:bg-slate-800 ${w === week ? 'bg-slate-800 ring-1 ring-slate-600' : ''} ${w === currentWeek && s.phase.kind === 'REGULAR_SEASON' ? 'font-bold' : ''}`;
+  const list = s.schedule.length ? Array.from({ length: LEAGUE_RULES.REGULAR_SEASON_WEEKS }, (_, i) => i + 1).map((w) => {
+    const f = s.schedule.find((x) => x.week === w && (x.homeId === user || x.awayId === user));
+    if (!f) return `<button ${uiAttr({ type: 'SCHEDULE_WEEK', week: w })} class="${rowCls(w)}"><span class="w-14 text-left text-slate-400 text-xs">Sem. ${w}</span><span class="text-xs font-bold text-slate-500 tracking-wider">BYE — semana de folga</span></button>`;
     const home = f.homeId === user;
     const opp = s.teams[home ? f.awayId : f.homeId];
     const res = f.result;
     const my = res ? (home ? res.home : res.away) : null, their = res ? (home ? res.away : res.home) : null;
     const tag = res ? (my > their ? '<span class="text-emerald-400 font-black">V</span>' : my < their ? '<span class="text-red-400 font-black">D</span>' : '<span class="text-slate-300 font-black">E</span>') : '';
-    return `<button ${uiAttr({ type: 'SCHEDULE_WEEK', week: f.week })} class="w-full flex items-center gap-2 text-sm py-1 px-2 rounded hover:bg-slate-800 ${f.week === week ? 'bg-slate-800 ring-1 ring-slate-600' : ''} ${f.week === currentWeek && s.phase.kind === 'REGULAR_SEASON' ? 'font-bold' : ''}">
-      <span class="w-14 text-left text-slate-400 text-xs">Sem. ${f.week}</span><span class="w-6 text-xs text-slate-500">${home ? 'vs' : '@'}</span>${teamChip(opp)}<span class="flex-1 text-left truncate">${esc(opp.name)}</span>
-      <span class="w-14 text-right">${res ? `${my}-${their}` : ''}</span><span class="w-4">${tag}</span></button>`;
-  }).join('');
+    const divGame = opp.conference === s.teams[user].conference && opp.division === s.teams[user].division;
+    return `<button ${uiAttr({ type: 'SCHEDULE_WEEK', week: w })} class="${rowCls(w)}">
+      <span class="w-14 text-left text-slate-400 text-xs">Sem. ${w}</span><span class="w-6 text-xs text-slate-500">${home ? 'vs' : '@'}</span>${teamChip(opp)}<span class="flex-1 text-left truncate">${esc(teamName(opp))}${divGame ? ' <span class="text-[10px] text-amber-300/80">DIV</span>' : ''}</span>
+      <span class="w-14 text-right tabular-nums">${res ? `${my}-${their}` : ''}</span><span class="w-4">${tag}</span></button>`;
+  }).join('') : '';
   const weekFixtures = s.schedule.filter((f) => f.week === week);
-  const inPlayoffs = s.playoffResults.length > 0 || ['PLAYOFFS_DIVISIONAL', 'PLAYOFFS_CONFERENCE', 'SUPER_BOWL'].includes(s.phase.kind);
+  const byes = s.teamOrder.filter((id) => s.schedule.length && !weekFixtures.some((f) => f.homeId === id || f.awayId === id));
+  const inPlayoffs = s.playoffResults.length > 0 || PLAYOFF_ROUNDS.includes(s.phase.kind);
   return `${inPlayoffs ? card('🏆 Chave dos Playoffs', renderBracket(s), 'mb-4') : ''}
     <div class="grid lg:grid-cols-2 gap-4">
       ${card(`📅 Seu Calendário ${s.seasonYear}`, list || '<div class="text-sm text-slate-500">Calendário será gerado na nova temporada.</div>')}
-      ${card(`🗓️ Rodada — Semana ${week}`, weekFixtures.map((f) => fixtureRow(s, f)).join('') || '<div class="text-sm text-slate-500">—</div>')}
+      ${card(`🗓️ Rodada — Semana ${week}`, (weekFixtures.map((f) => fixtureRow(s, f)).join('') || '<div class="text-sm text-slate-500">—</div>')
+        + (byes.length ? `<div class="text-xs text-slate-500 mt-2 px-2">Folga: ${byes.join(', ')}</div>` : ''))}
     </div>`;
 }
 
@@ -2263,7 +2521,7 @@ function render() {
   else if (s.liveRound) body = renderLiveRound(s);
   else body = (s.phase.kind === 'SEASON_RECAP' ? renderRecapBanner(s) : '') + renderTabs(s) + renderView(s);
   app.innerHTML = `${renderHeader(s)}<main class="max-w-7xl mx-auto px-4 py-4">${body}</main>
-    <footer class="text-center text-[11px] text-slate-600 pb-6">GridironFoot · salvo automaticamente · ${LEAGUE_RULES.SALARY_CAP}M de Salary Cap · ${s.teamOrder.length} franquias</footer>${renderConfirm()}${renderToast()}`;
+    <footer class="text-center text-[11px] text-slate-600 pb-6 px-4">GridironFoot · jogo de fã, sem afiliação com a NFL · elencos-base do início da temporada 2025 · salvo automaticamente</footer>${renderConfirm()}${renderToast()}`;
 }
 
 // --- 4.13 Controladores (eventos → ações) -------------------------------------------
