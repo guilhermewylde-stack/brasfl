@@ -7,7 +7,7 @@
 <meta name="description" content="GridironFoot — gerenciador de futebol americano inspirado no Brasfoot. Single-file application.">
 <script src="https://cdn.tailwindcss.com/3.4.16"></script>
 <style>
-  :root { --tp: #1e293b; --ts: #f59e0b; --tp-text: #ffffff; --ts-text: #111111; }
+  :root { color-scheme: dark; --tp: #1e293b; --ts: #f59e0b; --tp-text: #ffffff; --ts-text: #111111; }
   body { background: #0b1120; color: #e2e8f0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   .team-header { background: linear-gradient(100deg, var(--tp) 0%, var(--tp) 60%, color-mix(in srgb, var(--tp) 70%, var(--ts)) 100%); color: var(--tp-text); border-bottom: 5px solid var(--ts); }
   .team-border { border-color: var(--ts) !important; }
@@ -1673,6 +1673,8 @@ const ui = {
   marketTab: 'fa', marketPos: 'ALL', draftPos: 'ALL', scheduleWeek: null,
   live: { speed: 1, paused: false, halftimeShown: false },
   /** @type {null | {text:string, kind:string, id:number}} */ toast: null,
+  /** Confirmação dentro da página (diálogos nativos podem estar bloqueados). */
+  /** @type {null | {text:string, game?:object, ui?:object}} */ pendingConfirm: null,
 };
 const BASE_TICK_MS = 420;
 const prevScores = new Map();
@@ -2222,6 +2224,17 @@ function renderLiveRound(s) {
 }
 
 // --- 4.12 Composição principal ------------------------------------------------------
+function renderConfirm() {
+  if (!ui.pendingConfirm) return '';
+  return `<div class="fixed inset-0 z-40 bg-black/70 flex items-center justify-center px-4">
+    <div class="w-full max-w-md rounded-xl border-2 team-border bg-slate-900 p-5 shadow-2xl">
+      <div class="font-bold text-lg mb-1">Confirmar</div>
+      <p class="text-sm text-slate-300">${esc(ui.pendingConfirm.text)}</p>
+      <div class="flex justify-end gap-2 mt-5">
+        <button ${uiAttr({ type: 'CONFIRM_NO' })} class="btn bg-slate-700">Cancelar</button>
+        <button ${uiAttr({ type: 'CONFIRM_YES' })} class="btn bg-amber-500 text-black">Confirmar</button>
+      </div></div></div>`;
+}
 function renderToast() {
   if (!ui.toast) return '';
   const cls = { error: 'bg-red-700', info: 'bg-slate-700', good: 'bg-emerald-700' }[ui.toast.kind] || 'bg-slate-700';
@@ -2242,7 +2255,7 @@ function renderView(s) {
 const app = document.getElementById('app');
 function render() {
   const s = store.getState();
-  if (!s) { document.documentElement.removeAttribute('style'); app.innerHTML = renderTeamSelect() + renderToast(); return; }
+  if (!s) { document.documentElement.removeAttribute('style'); app.innerHTML = renderTeamSelect() + renderConfirm() + renderToast(); return; }
   applyTheme(s.teams[s.userTeamId]);
   if (ui.view === 'draft' && s.phase.kind !== 'OFFSEASON_DRAFT') ui.view = 'roster';
   let body;
@@ -2250,7 +2263,7 @@ function render() {
   else if (s.liveRound) body = renderLiveRound(s);
   else body = (s.phase.kind === 'SEASON_RECAP' ? renderRecapBanner(s) : '') + renderTabs(s) + renderView(s);
   app.innerHTML = `${renderHeader(s)}<main class="max-w-7xl mx-auto px-4 py-4">${body}</main>
-    <footer class="text-center text-[11px] text-slate-600 pb-6">GridironFoot · salvo automaticamente · ${LEAGUE_RULES.SALARY_CAP}M de Salary Cap · ${s.teamOrder.length} franquias</footer>${renderToast()}`;
+    <footer class="text-center text-[11px] text-slate-600 pb-6">GridironFoot · salvo automaticamente · ${LEAGUE_RULES.SALARY_CAP}M de Salary Cap · ${s.teamOrder.length} franquias</footer>${renderConfirm()}${renderToast()}`;
 }
 
 // --- 4.13 Controladores (eventos → ações) -------------------------------------------
@@ -2288,7 +2301,17 @@ function handleUi(a) {
       if (dispatchGame({ type: 'NEW_GAME', userTeamId: a.teamId })) { ui.view = 'roster'; ui.scheduleWeek = null; }
       break;
     case 'NEW_GAME':
-      if (!window.confirm('Abandonar o jogo atual e começar do zero? O save será apagado.')) return;
+      ui.pendingConfirm = { text: 'Abandonar o jogo atual e começar do zero? O save será apagado.', ui: { type: 'NEW_GAME_CONFIRMED' } };
+      break;
+    case 'CONFIRM_NO': ui.pendingConfirm = null; break;
+    case 'CONFIRM_YES': {
+      const pending = ui.pendingConfirm;
+      ui.pendingConfirm = null;
+      if (pending?.game) dispatchGame(pending.game);
+      if (pending?.ui) { handleUi(pending.ui); return; }
+      break;
+    }
+    case 'NEW_GAME_CONFIRMED':
       clearTimeout(tickTimer);
       prevScores.clear();
       store.replace(null);
@@ -2332,7 +2355,7 @@ document.addEventListener('click', (ev) => {
     const action = JSON.parse(el.dataset.game);
     const err = validateAction(store.getState(), action);
     if (err) { showToast(err, 'error'); render(); return; }
-    if (el.dataset.confirm && !window.confirm(el.dataset.confirm)) return;
+    if (el.dataset.confirm) { ui.pendingConfirm = { text: el.dataset.confirm, game: action }; render(); return; }
     dispatchGame(action);
   } else {
     handleUi(JSON.parse(el.dataset.ui));
